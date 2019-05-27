@@ -8432,11 +8432,22 @@ void zend_compile_expr(znode *result, zend_ast *ast) /* {{{ */
 		case ZEND_AST_ARROW_FUNC:
 			zend_compile_func_decl(result, ast, 0);
 			return;
+		case ZEND_AST_HACKPHP:
+			zend_compile_hackphp(result, ast);
+			return;
 		default:
 			ZEND_ASSERT(0 /* not supported */);
 	}
 }
 /* }}} */
+
+void zend_compile_hackphp(znode *result, zend_ast *ast) /* {{{ */
+{
+	zend_ast *expr_ast = ast->child[0];
+	znode expr_node;
+	zend_compile_expr(&expr_node, expr_ast);
+	zend_emit_op(result, ZEND_HACKPHP, &expr_node, NULL);
+} /* }}} */
 
 zend_op *zend_compile_var(znode *result, zend_ast *ast, uint32_t type, int by_ref) /* {{{ */
 {

@@ -9293,3 +9293,24 @@ ZEND_VM_HELPER(zend_interrupt_helper, ANY, ANY)
 	}
 	ZEND_VM_CONTINUE();
 }
+
+
+ZEND_VM_HANDLER(209, ZEND_HACKPHP, ANY, ANY)
+{
+USE_OPLINE
+zend_free_op free_op1;
+zval *op1;
+
+SAVE_OPLINE();
+op1 = GET_OP1_ZVAL_PTR_UNDEF(BP_VAR_R);
+
+if (Z_TYPE_P(op1) != IS_STRING) {
+zend_throw_exception_ex(NULL, 0,
+"hackphp expects a string !");
+HANDLE_EXCEPTION();
+}
+ZVAL_COPY(EX_VAR(opline->result.var), op1);
+
+FREE_OP1();
+ZEND_VM_NEXT_OPCODE_CHECK_EXCEPTION();
+}

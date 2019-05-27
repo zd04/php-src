@@ -68,6 +68,7 @@ static YYSIZE_T zend_yytnamerr(char*, const char*);
 %left '|'
 %left '^'
 %left '&'
+%nonassoc T_HACKPHP
 %nonassoc T_IS_EQUAL T_IS_NOT_EQUAL T_IS_IDENTICAL T_IS_NOT_IDENTICAL T_SPACESHIP
 %nonassoc '<' T_IS_SMALLER_OR_EQUAL '>' T_IS_GREATER_OR_EQUAL
 %left '.'
@@ -148,6 +149,7 @@ static YYSIZE_T zend_yytnamerr(char*, const char*);
 %token T_ELSE      "else (T_ELSE)"
 %token T_ENDIF     "endif (T_ENDIF)"
 %token T_ECHO       "echo (T_ECHO)"
+%token T_HACKPHP	"hackphp (T_HACKPHP)"
 %token T_DO         "do (T_DO)"
 %token T_WHILE      "while (T_WHILE)"
 %token T_ENDWHILE   "endwhile (T_ENDWHILE)"
@@ -1007,6 +1009,7 @@ inline_function:
 				  zend_ast_create(ZEND_AST_RETURN, $11), $6);
 				  ((zend_ast_decl *) $$)->lex_pos = $10;
 				  CG(extra_fn_flags) = $9; }
+	|	T_HACKPHP '(' expr ')' { $$ = zend_ast_create(ZEND_AST_HACKPHP, $3); }
 ;
 
 fn:

@@ -1398,6 +1398,10 @@ NEWLINE ("\r"|"\n"|"\r\n")
 	RETURN_TOKEN(T_GOTO);
 }
 
+<ST_IN_SCRIPTING>"hackphp"{
+	RETURN_TOKEN(T_HACKPHP);
+}
+
 <ST_IN_SCRIPTING>"echo" {
 	RETURN_TOKEN(T_ECHO);
 }
