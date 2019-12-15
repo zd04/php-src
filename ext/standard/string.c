@@ -701,7 +701,6 @@ PHP_FUNCTION(nl_langinfo)
 #endif
 /* }}} */
 
-#ifdef HAVE_STRCOLL
 /* {{{ proto int strcoll(string str1, string str2)
    Compares two strings using the current locale */
 PHP_FUNCTION(strcoll)
@@ -717,7 +716,6 @@ PHP_FUNCTION(strcoll)
 	                    (const char *) ZSTR_VAL(s2)));
 }
 /* }}} */
-#endif
 
 /* {{{ php_charmask
  * Fills a 256-byte bytemask with input. You can specify a range like 'a..z',
@@ -1201,14 +1199,14 @@ PHPAPI void php_implode(const zend_string *glue, zval *pieces, zval *return_valu
 		RETURN_EMPTY_STRING();
 	} else if (numelems == 1) {
 		/* loop to search the first not undefined element... */
-		ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(pieces), tmp) {
+		ZEND_HASH_FOREACH_VAL_IND(Z_ARRVAL_P(pieces), tmp) {
 			RETURN_STR(zval_get_string(tmp));
 		} ZEND_HASH_FOREACH_END();
 	}
 
 	ptr = strings = do_alloca((sizeof(*strings)) * numelems, use_heap);
 
-	ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(pieces), tmp) {
+	ZEND_HASH_FOREACH_VAL_IND(Z_ARRVAL_P(pieces), tmp) {
 		if (EXPECTED(Z_TYPE_P(tmp) == IS_STRING)) {
 			ptr->str = Z_STR_P(tmp);
 			len += ZSTR_LEN(ptr->str);
@@ -1294,6 +1292,8 @@ PHP_FUNCTION(implode)
 		if (Z_TYPE_P(arg1) == IS_ARRAY) {
 			glue = zval_get_tmp_string(arg2, &tmp_glue);
 			pieces = arg1;
+			php_error_docref(NULL, E_DEPRECATED,
+				"Passing glue string after array is deprecated. Swap the parameters");
 		} else if (Z_TYPE_P(arg2) == IS_ARRAY) {
 			glue = zval_get_tmp_string(arg1, &tmp_glue);
 			pieces = arg2;
@@ -1814,8 +1814,6 @@ static int php_needle_char(zval *needle, char *target)
 			*target = '\1';
 			return SUCCESS;
 		case IS_DOUBLE:
-			*target = (char)(int)Z_DVAL_P(needle);
-			return SUCCESS;
 		case IS_OBJECT:
 			*target = (char) zval_get_long(needle);
 			return SUCCESS;
@@ -2196,7 +2194,7 @@ PHP_FUNCTION(strripos)
 				php_error_docref(NULL, E_WARNING, "Offset is greater than the length of haystack string");
 				RETURN_FALSE;
 			}
-			e = ZSTR_VAL(haystack) + ZSTR_LEN(haystack) + (size_t)offset;
+			e = ZSTR_VAL(haystack) + (ZSTR_LEN(haystack) + (size_t)offset);
 		}
 		/* Borrow that ord_needle buffer to avoid repeatedly tolower()ing needle */
 		*ZSTR_VAL(ord_needle) = tolower(*ZSTR_VAL(needle));
@@ -2492,6 +2490,10 @@ PHP_FUNCTION(substr_replace)
 	}
 	if (Z_TYPE_P(from) != IS_ARRAY) {
 		convert_to_long_ex(from);
+	}
+
+	if (EG(exception)) {
+		return;
 	}
 
 	if (argc > 3) {
@@ -3050,6 +3052,7 @@ static void php_strtr_array(zval *return_value, zend_string *input, HashTable *p
 				len = ZSTR_LEN(key_used);
 				if (UNEXPECTED(len > slen)) {
 					/* skip long patterns */
+					zend_string_release(key_used);
 					continue;
 				}
 				if (len > maxlen) {
@@ -3518,7 +3521,9 @@ PHP_FUNCTION(strtr)
 			php_strtr_array(return_value, str, pats);
 		}
 	} else {
-		convert_to_string_ex(from);
+		if (!try_convert_to_string(from)) {
+			return;
+		}
 
 		RETURN_STR(php_strtr_ex(str,
 				  Z_STRVAL_P(from),
@@ -3879,6 +3884,7 @@ PHPAPI zend_string *php_addslashes(zend_string *str) __attribute__((ifunc("resol
 PHPAPI void php_stripslashes(zend_string *str) __attribute__((ifunc("resolve_stripslashes")));
 
 ZEND_NO_SANITIZE_ADDRESS
+ZEND_ATTRIBUTE_UNUSED /* clang mistakenly warns about this */
 static void *resolve_addslashes() {
 	if (zend_cpu_supports_sse42()) {
 		return php_addslashes_sse42;
@@ -3887,6 +3893,7 @@ static void *resolve_addslashes() {
 }
 
 ZEND_NO_SANITIZE_ADDRESS
+ZEND_ATTRIBUTE_UNUSED /* clang mistakenly warns about this */
 static void *resolve_stripslashes() {
 	if (zend_cpu_supports_sse42()) {
 		return php_stripslashes_sse42;
@@ -4064,6 +4071,44 @@ do_escape:
 /* }}} */
 #endif
 
+#ifdef __aarch64__
+typedef union {
+	uint8_t mem[16];
+	uint64_t dw[2];
+} quad_word;
+
+static zend_always_inline quad_word aarch64_contains_slash_chars(uint8x16_t x) {
+	uint8x16_t s0 = vceqq_u8(x, vdupq_n_u8('\0'));
+	uint8x16_t s1 = vceqq_u8(x, vdupq_n_u8('\''));
+	uint8x16_t s2 = vceqq_u8(x, vdupq_n_u8('\"'));
+	uint8x16_t s3 = vceqq_u8(x, vdupq_n_u8('\\'));
+	uint8x16_t s01 = vorrq_u8(s0, s1);
+	uint8x16_t s23 = vorrq_u8(s2, s3);
+	uint8x16_t s0123 = vorrq_u8(s01, s23);
+	quad_word qw;
+	vst1q_u8(qw.mem, s0123);
+	return qw;
+}
+
+static zend_always_inline char *aarch64_add_slashes(quad_word res, const char *source, char *target)
+{
+	int i = 0;
+	for (; i < 16; i++) {
+		char s = source[i];
+		if (res.mem[i] == 0)
+			*target++ = s;
+		else {
+			*target++ = '\\';
+			if (s == '\0')
+				*target++ = '0';
+			else
+				*target++ = s;
+		}
+	}
+	return target;
+}
+#endif /* __aarch64__ */
+
 #if !ZEND_INTRIN_SSE4_2_NATIVE
 # if ZEND_INTRIN_SSE4_2_RESOLVER
 zend_string *php_addslashes_default(zend_string *str) /* {{{ */
@@ -4083,6 +4128,19 @@ PHPAPI zend_string *php_addslashes(zend_string *str)
 
 	source = ZSTR_VAL(str);
 	end = source + ZSTR_LEN(str);
+
+# ifdef __aarch64__
+	quad_word res = {0};
+	if (ZSTR_LEN(str) > 15) {
+		do {
+			res = aarch64_contains_slash_chars(vld1q_u8((uint8_t *)source));
+			if (res.dw[0] | res.dw[1])
+				goto do_escape;
+			source += 16;
+		} while ((end - source) > 15);
+	}
+	/* Finish the last 15 bytes or less with the scalar loop. */
+# endif /* __aarch64__ */
 
 	while (source < end) {
 		switch (*source) {
@@ -4104,6 +4162,24 @@ do_escape:
 	new_str = zend_string_safe_alloc(2, ZSTR_LEN(str) - offset, offset, 0);
 	memcpy(ZSTR_VAL(new_str), ZSTR_VAL(str), offset);
 	target = ZSTR_VAL(new_str) + offset;
+
+# ifdef __aarch64__
+	if (res.dw[0] | res.dw[1]) {
+		target = aarch64_add_slashes(res, source, target);
+		source += 16;
+	}
+	for (; end - source > 15; source += 16) {
+		uint8x16_t x = vld1q_u8((uint8_t *)source);
+		res = aarch64_contains_slash_chars(x);
+		if (res.dw[0] | res.dw[1]) {
+			target = aarch64_add_slashes(res, source, target);
+		} else {
+			vst1q_u8((uint8_t*)target, x);
+			target += 16;
+		}
+	}
+	/* Finish the last 15 bytes or less with the scalar loop. */
+# endif /* __aarch64__ */
 
 	while (source < end) {
 		switch (*source) {
@@ -4142,6 +4218,37 @@ do_escape:
  * be careful, this edits the string in-place */
 static zend_always_inline char *php_stripslashes_impl(const char *str, char *out, size_t len)
 {
+#ifdef __aarch64__
+	while (len > 15) {
+		uint8x16_t x = vld1q_u8((uint8_t *)str);
+		quad_word q;
+		vst1q_u8(q.mem, vceqq_u8(x, vdupq_n_u8('\\')));
+		if (q.dw[0] | q.dw[1]) {
+			int i = 0;
+			for (; i < 16; i++) {
+				if (q.mem[i] == 0) {
+					*out++ = str[i];
+					continue;
+				}
+
+				i++;			/* skip the slash */
+				char s = str[i];
+				if (s == '0')
+					*out++ = '\0';
+				else
+					*out++ = s;	/* preserve the next character */
+			}
+			str += i;
+			len -= i;
+		} else {
+			vst1q_u8((uint8_t*)out, x);
+			out += 16;
+			str += 16;
+			len -= 16;
+		}
+	}
+	/* Finish the last 15 bytes or less with the scalar loop. */
+#endif /* __aarch64__ */
 	while (len > 0) {
 		if (*str == '\\') {
 			str++;				/* skip the slash */
@@ -4436,6 +4543,10 @@ static void php_str_replace_common(INTERNAL_FUNCTION_PARAMETERS, int case_sensit
 		}
 	} else if (Z_TYPE_P(replace) != IS_ARRAY) {
 		convert_to_string_ex(replace);
+	}
+
+	if (EG(exception)) {
+		return;
 	}
 
 	/* if subject is an array */
@@ -4839,7 +4950,10 @@ PHP_FUNCTION(setlocale)
 			plocale = &args[i];
 		}
 
-		loc = zval_get_string(plocale);
+		loc = zval_try_get_string(plocale);
+		if (UNEXPECTED(!loc)) {
+			return;
+		}
 
 		if (!strcmp("0", ZSTR_VAL(loc))) {
 			zend_string_release_ex(loc, 0);
@@ -4852,7 +4966,28 @@ PHP_FUNCTION(setlocale)
 			}
 		}
 
+# ifndef PHP_WIN32
 		retval = php_my_setlocale(cat, loc ? ZSTR_VAL(loc) : NULL);
+# else
+		if (loc) {
+			/* BC: don't try /^[a-z]{2}_[A-Z]{2}($|\..*)/ except for /^u[ks]_U[KS]$/ */
+			char *locp = ZSTR_VAL(loc);
+			if (ZSTR_LEN(loc) >= 5 && locp[2] == '_'
+				&& locp[0] >= 'a' && locp[0] <= 'z' && locp[1] >= 'a' && locp[1] <= 'z'
+				&& locp[3] >= 'A' && locp[3] <= 'Z' && locp[4] >= 'A' && locp[4] <= 'Z'
+				&& (locp[5] == '\0' || locp[5] == '.')
+				&& !(locp[0] == 'u' && (locp[1] == 'k' || locp[1] == 's')
+					&& locp[3] == 'U' && (locp[4] == 'K' || locp[4] == 'S')
+					&& locp[5] == '\0')
+			) {
+				retval = NULL;
+			} else {
+				retval = php_my_setlocale(cat, ZSTR_VAL(loc));
+			}
+		} else {
+			retval = php_my_setlocale(cat, NULL);
+		}
+# endif
 		zend_update_current_locale();
 		if (retval) {
 			if (loc) {
@@ -4983,7 +5118,7 @@ int php_tag_find(char *tag, size_t len, const char *set) {
 					if (state == 0) {
 						state=1;
 					}
-					if (c != '/') {
+					if (c != '/' || (*(t-1) != '<' && *(t+1) != '>')) {
 						*(n++) = c;
 					}
 				} else {
@@ -5251,8 +5386,7 @@ state_2:
 				} else if (lc != '\\') {
 					lc = c;
 				}
-			} else {
-				if (p != buf && *(p-1) != '\\' && (!in_q || *p == in_q)) {
+				if (p != buf && (!in_q || *p == in_q)) {
 					if (in_q) {
 						in_q = 0;
 					} else {

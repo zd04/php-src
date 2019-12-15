@@ -11,11 +11,6 @@ AC_DEFUN([AC_FPM_STDLIBS],
 
   AC_SEARCH_LIBS(socket, socket)
   AC_SEARCH_LIBS(inet_addr, nsl)
-
-  AC_CHECK_HEADERS([fcntl.h unistd.h sys/uio.h])
-  AC_CHECK_HEADERS([sys/select.h sys/socket.h sys/time.h])
-  AC_CHECK_HEADERS([arpa/inet.h netinet/in.h])
-  AC_CHECK_HEADERS([sysexits.h])
 ])
 
 AC_DEFUN([AC_FPM_PRCTL],
@@ -464,30 +459,6 @@ AC_DEFUN([AC_FPM_EPOLL],
 	])
 ])
 
-AC_DEFUN([AC_FPM_POLL],
-[
-	AC_MSG_CHECKING([for poll])
-
-	AC_COMPILE_IFELSE([AC_LANG_PROGRAM([[
-		#include <poll.h>
-	]], [[
-		struct pollfd fds[2];
-
-		fds[0].fd = 0;
-		fds[0].events = POLLIN;
-
-		fds[1].fd = 0;
-		fds[1].events = POLLIN;
-
-		 poll(fds, 2, 1);
-	]])], [
-		AC_DEFINE([HAVE_POLL], 1, [do we have poll?])
-		AC_MSG_RESULT([yes])
-	], [
-		AC_MSG_RESULT([no])
-	])
-])
-
 AC_DEFUN([AC_FPM_SELECT],
 [
 	AC_MSG_CHECKING([for select])
@@ -549,7 +520,6 @@ if test "$PHP_FPM" != "no"; then
   AC_FPM_PORT
   AC_FPM_DEVPOLL
   AC_FPM_EPOLL
-  AC_FPM_POLL
   AC_FPM_SELECT
   AC_FPM_APPARMOR
 

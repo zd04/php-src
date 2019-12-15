@@ -247,6 +247,10 @@ static void zend_persist_zval(zval *z)
 				efree(old_ref);
 			}
 			break;
+		default:
+			ZEND_ASSERT(Z_TYPE_P(z) != IS_OBJECT);
+			ZEND_ASSERT(Z_TYPE_P(z) != IS_RESOURCE);
+			break;
 	}
 }
 
@@ -395,7 +399,7 @@ static void zend_persist_op_array_ex(zend_op_array *op_array, zend_persistent_sc
 				 || opline->opcode == ZEND_SEND_VAL_EX
 				 || opline->opcode == ZEND_QM_ASSIGN) {
 					/* Update handlers to eliminate REFCOUNTED check */
-					zend_vm_set_opcode_handler_ex(opline, 0, 0, 0);
+					zend_vm_set_opcode_handler_ex(opline, 1 << Z_TYPE_P(opline->op1.zv), 0, 0);
 				}
 			}
 			if (opline->op2_type == IS_CONST) {
@@ -449,8 +453,6 @@ static void zend_persist_op_array_ex(zend_op_array *op_array, zend_persistent_sc
 							opline->op2.jmp_addr = &new_opcodes[opline->op2.jmp_addr - op_array->opcodes];
 						}
 						break;
-					case ZEND_DECLARE_ANON_CLASS:
-					case ZEND_DECLARE_ANON_INHERITED_CLASS:
 					case ZEND_FE_FETCH_R:
 					case ZEND_FE_FETCH_RW:
 					case ZEND_SWITCH_LONG:
@@ -698,6 +700,12 @@ static void zend_persist_class_entry(zval *zv)
 	zend_class_entry *ce = Z_PTR_P(zv);
 
 	if (ce->type == ZEND_USER_CLASS) {
+		/* The same zend_class_entry may be reused by class_alias */
+		zend_class_entry *new_ce = zend_shared_alloc_get_xlat_entry(ce);
+		if (new_ce) {
+			Z_PTR_P(zv) = new_ce;
+			return;
+		}
 		if ((ce->ce_flags & ZEND_ACC_LINKED)
 		 && (ce->ce_flags & ZEND_ACC_CONSTANTS_UPDATED)
 		 && (ce->ce_flags & ZEND_ACC_PROPERTY_TYPES_RESOLVED)
@@ -929,8 +937,9 @@ static void zend_update_parent_ce(zend_class_entry *ce)
 				zend_class_entry *ce = ZEND_TYPE_CE(prop->type);
 				if (ce->type == ZEND_USER_CLASS) {
 					ce = zend_shared_alloc_get_xlat_entry(ce);
-					ZEND_ASSERT(ce);
-					prop->type = ZEND_TYPE_ENCODE_CE(ce, ZEND_TYPE_ALLOW_NULL(prop->type));
+					if (ce) {
+						prop->type = ZEND_TYPE_ENCODE_CE(ce, ZEND_TYPE_ALLOW_NULL(prop->type));
+					}
 				}
 			}
 		} ZEND_HASH_FOREACH_END();
@@ -1028,8 +1037,11 @@ static void zend_accel_persist_class_table(HashTable *class_table)
 		zend_accel_store_interned_string(p->key);
 		zend_persist_class_entry(&p->val);
 	} ZEND_HASH_FOREACH_END();
-    ZEND_HASH_FOREACH_PTR(class_table, ce) {
-		zend_update_parent_ce(ce);
+    ZEND_HASH_FOREACH_BUCKET(class_table, p) {
+		if (EXPECTED(Z_TYPE(p->val) != IS_ALIAS_PTR)) {
+			ce = Z_PTR(p->val);
+			zend_update_parent_ce(ce);
+		}
 	} ZEND_HASH_FOREACH_END();
 }
 

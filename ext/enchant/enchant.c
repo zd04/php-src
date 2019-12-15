@@ -315,10 +315,10 @@ PHP_MINFO_FUNCTION(enchant)
 	pbroker = enchant_broker_init();
 	php_info_print_table_start();
 	php_info_print_table_row(2, "enchant support", "enabled");
-#ifdef ENCHANT_VERSION_STRING
-	php_info_print_table_row(2, "Libenchant Version", ENCHANT_VERSION_STRING);
+#ifdef HAVE_ENCHANT_GET_VERSION
+	php_info_print_table_row(2, "Libenchant Version", enchant_get_version());
 #elif defined(HAVE_ENCHANT_BROKER_SET_PARAM)
-	php_info_print_table_row(2, "Libenchant Version", "1.5.0 or later");
+	php_info_print_table_row(2, "Libenchant Version", "1.5.x");
 #endif
 	php_info_print_table_end();
 
@@ -506,7 +506,7 @@ PHP_FUNCTION(enchant_broker_get_dict_path)
 /* }}} */
 #endif
 
-/* {{{ proto string enchant_broker_list_dicts(resource broker)
+/* {{{ proto array enchant_broker_list_dicts(resource broker)
    Lists the dictionaries available for the given broker */
 PHP_FUNCTION(enchant_broker_list_dicts)
 {

@@ -124,6 +124,11 @@ static void com_write_dimension(zval *object, zval *offset, zval *value)
 
 	obj = CDNO_FETCH(object);
 
+	if (offset == NULL) {
+		php_com_throw_exception(DISP_E_BADINDEX, "appending to variants is not supported");
+		return;
+	}
+
 	if (V_VT(&obj->v) == VT_DISPATCH) {
 		ZVAL_COPY_VALUE(&args[0], offset);
 		ZVAL_COPY_VALUE(&args[1], value);
@@ -172,6 +177,11 @@ static void com_write_dimension(zval *object, zval *offset, zval *value)
 	} else {
 		php_com_throw_exception(E_INVALIDARG, "this variant is not an array type");
 	}
+}
+
+static zval *com_get_property_ptr_ptr(zval *object, zval *member, int type, void **cache_slot)
+{
+	return NULL;
 }
 
 #if 0
@@ -546,7 +556,7 @@ zend_object_handlers php_com_object_handlers = {
 	com_property_write,
 	com_read_dimension,
 	com_write_dimension,
-	NULL,
+	com_get_property_ptr_ptr,
 	NULL, /* com_object_get, */
 	NULL, /* com_object_set, */
 	com_property_exists,

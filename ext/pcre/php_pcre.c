@@ -83,8 +83,10 @@ ZEND_TLS zend_bool              mdata_used = 0;
 ZEND_TLS uint8_t pcre2_init_ok = 0;
 #if defined(ZTS) && defined(HAVE_PCRE_JIT_SUPPORT)
 static MUTEX_T pcre_mt = NULL;
-#define php_pcre_mutex_alloc() if (tsrm_is_main_thread() && !pcre_mt) pcre_mt = tsrm_mutex_alloc();
-#define php_pcre_mutex_free() if (tsrm_is_main_thread() && pcre_mt) tsrm_mutex_free(pcre_mt); pcre_mt = NULL;
+#define php_pcre_mutex_alloc() \
+	if (tsrm_is_main_thread() && !pcre_mt) pcre_mt = tsrm_mutex_alloc();
+#define php_pcre_mutex_free() \
+	if (tsrm_is_main_thread() && pcre_mt) { tsrm_mutex_free(pcre_mt); pcre_mt = NULL; }
 #define php_pcre_mutex_lock() tsrm_mutex_lock(pcre_mt);
 #define php_pcre_mutex_unlock() tsrm_mutex_unlock(pcre_mt);
 #else
@@ -143,7 +145,16 @@ static void php_free_pcre_cache(zval *data) /* {{{ */
 	pcre_cache_entry *pce = (pcre_cache_entry *) Z_PTR_P(data);
 	if (!pce) return;
 	pcre2_code_free(pce->re);
-	pefree(pce, !PCRE_G(per_request_cache));
+	free(pce);
+}
+/* }}} */
+
+static void php_efree_pcre_cache(zval *data) /* {{{ */
+{
+	pcre_cache_entry *pce = (pcre_cache_entry *) Z_PTR_P(data);
+	if (!pce) return;
+	pcre2_code_free(pce->re);
+	efree(pce);
 }
 /* }}} */
 
@@ -459,7 +470,7 @@ static PHP_RINIT_FUNCTION(pcre)
 #endif
 
 	if (PCRE_G(per_request_cache)) {
-		zend_hash_init(&PCRE_G(pcre_cache), 0, NULL, php_free_pcre_cache, 0);
+		zend_hash_init(&PCRE_G(pcre_cache), 0, NULL, php_efree_pcre_cache, 0);
 	}
 
 	return SUCCESS;
@@ -556,7 +567,7 @@ static zend_always_inline size_t calculate_unit_length(pcre_cache_entry *pce, ch
 
 /* {{{ pcre_get_compiled_regex_cache
  */
-PHPAPI pcre_cache_entry* pcre_get_compiled_regex_cache(zend_string *regex)
+PHPAPI pcre_cache_entry* pcre_get_compiled_regex_cache_ex(zend_string *regex, int locale_aware)
 {
 	pcre2_code			*re = NULL;
 	uint32_t			 coptions = 0;
@@ -578,7 +589,7 @@ PHPAPI pcre_cache_entry* pcre_get_compiled_regex_cache(zend_string *regex)
 	zend_string 		*key;
 	pcre_cache_entry *ret;
 
-	if (BG(locale_string) &&
+	if (locale_aware && BG(locale_string) &&
 		(ZSTR_LEN(BG(locale_string)) != 1 && ZSTR_VAL(BG(locale_string))[0] != 'C')) {
 		key = zend_string_alloc(ZSTR_LEN(regex) + ZSTR_LEN(BG(locale_string)) + 1, 0);
 		memcpy(ZSTR_VAL(key), ZSTR_VAL(BG(locale_string)), ZSTR_LEN(BG(locale_string)) + 1);
@@ -752,6 +763,7 @@ PHPAPI pcre_cache_entry* pcre_get_compiled_regex_cache(zend_string *regex)
 				return NULL;
 			}
 			_k = zend_string_init(ZSTR_VAL(BG(locale_string)), ZSTR_LEN(BG(locale_string)), 1);
+			GC_MAKE_PERSISTENT_LOCAL(_k);
 			zend_hash_add_ptr(&char_tables, _k, (void *)tables);
 			zend_string_release(_k);
 		}
@@ -791,6 +803,12 @@ PHPAPI pcre_cache_entry* pcre_get_compiled_regex_cache(zend_string *regex)
 			if (!pcre2_pattern_info(re, PCRE2_INFO_JITSIZE, &jit_size) && jit_size > 0) {
 				poptions |= PREG_JIT;
 			}
+		} else if (rc == PCRE2_ERROR_NOMEMORY) {
+			php_error_docref(NULL, E_WARNING,
+				"Allocation of JIT memory failed, PCRE JIT will be disabled. "
+				"This is likely caused by security restrictions. "
+				"Either grant PHP permission to allocate executable memory, or set pcre.jit=0");
+			PCRE_G(jit) = 0;
 		} else {
 			pcre2_get_error_message(rc, error, sizeof(error));
 			php_error_docref(NULL, E_WARNING, "JIT compilation failed: %s", error);
@@ -863,6 +881,14 @@ PHPAPI pcre_cache_entry* pcre_get_compiled_regex_cache(zend_string *regex)
 }
 /* }}} */
 
+/* {{{ pcre_get_compiled_regex_cache
+ */
+PHPAPI pcre_cache_entry* pcre_get_compiled_regex_cache(zend_string *regex)
+{
+	return pcre_get_compiled_regex_cache_ex(regex, 1);
+}
+/* }}} */
+
 /* {{{ pcre_get_compiled_regex
  */
 PHPAPI pcre2_code *pcre_get_compiled_regex(zend_string *regex, uint32_t *capture_count)
@@ -931,23 +957,17 @@ PHPAPI void php_pcre_free_match_data(pcre2_match_data *match_data)
 }/*}}}*/
 
 static void init_unmatched_null_pair() {
-	zval tmp;
-	zval *pair = &PCRE_G(unmatched_null_pair);
-	array_init_size(pair, 2);
-	ZVAL_NULL(&tmp);
-	zend_hash_next_index_insert_new(Z_ARRVAL_P(pair), &tmp);
-	ZVAL_LONG(&tmp, -1);
-	zend_hash_next_index_insert_new(Z_ARRVAL_P(pair), &tmp);
+	zval val1, val2;
+	ZVAL_NULL(&val1);
+	ZVAL_LONG(&val2, -1);
+	ZVAL_ARR(&PCRE_G(unmatched_null_pair), zend_new_pair(&val1, &val2));
 }
 
 static void init_unmatched_empty_pair() {
-	zval tmp;
-	zval *pair = &PCRE_G(unmatched_empty_pair);
-	array_init_size(pair, 2);
-	ZVAL_EMPTY_STRING(&tmp);
-	zend_hash_next_index_insert_new(Z_ARRVAL_P(pair), &tmp);
-	ZVAL_LONG(&tmp, -1);
-	zend_hash_next_index_insert_new(Z_ARRVAL_P(pair), &tmp);
+	zval val1, val2;
+	ZVAL_EMPTY_STRING(&val1);
+	ZVAL_LONG(&val2, -1);
+	ZVAL_ARR(&PCRE_G(unmatched_empty_pair), zend_new_pair(&val1, &val2));
 }
 
 static zend_always_inline void populate_match_value_str(
@@ -980,7 +1000,7 @@ static inline void add_offset_pair(
 		zval *result, const char *subject, PCRE2_SIZE start_offset, PCRE2_SIZE end_offset,
 		zend_string *name, uint32_t unmatched_as_null)
 {
-	zval match_pair, tmp;
+	zval match_pair;
 
 	/* Add (match, offset) to the return value */
 	if (PCRE2_UNSET == start_offset) {
@@ -996,11 +1016,10 @@ static inline void add_offset_pair(
 			ZVAL_COPY(&match_pair, &PCRE_G(unmatched_empty_pair));
 		}
 	} else {
-		array_init_size(&match_pair, 2);
-		populate_match_value_str(&tmp, subject, start_offset, end_offset);
-		zend_hash_next_index_insert_new(Z_ARRVAL(match_pair), &tmp);
-		ZVAL_LONG(&tmp, start_offset);
-		zend_hash_next_index_insert_new(Z_ARRVAL(match_pair), &tmp);
+		zval val1, val2;
+		populate_match_value_str(&val1, subject, start_offset, end_offset);
+		ZVAL_LONG(&val2, start_offset);
+		ZVAL_ARR(&match_pair, zend_new_pair(&val1, &val2));
 	}
 
 	if (name) {
@@ -1340,7 +1359,11 @@ matched:
 				count = pcre2_match(pce->re, (PCRE2_SPTR)subject, subject_len, start_offset2,
 					PCRE2_NO_UTF_CHECK | PCRE2_NOTEMPTY_ATSTART | PCRE2_ANCHORED, match_data, mctx);
 				if (count >= 0) {
-					goto matched;
+					if (global) {
+						goto matched;
+					} else {
+						break;
+					}
 				} else if (count == PCRE2_ERROR_NOMATCH) {
 					/* If we previously set PCRE2_NOTEMPTY_ATSTART after a null match,
 					   this is not necessarily the end. We need to advance
@@ -1528,6 +1551,11 @@ PHPAPI zend_string *php_pcre_replace(zend_string *regex,
 {
 	pcre_cache_entry	*pce;			    /* Compiled regular expression */
 	zend_string	 		*result;			/* Function result */
+
+	/* Abort on pending exception, e.g. thrown from __toString(). */
+	if (UNEXPECTED(EG(exception))) {
+		return NULL;
+	}
 
 	/* Compile regex or get it from cache. */
 	if ((pce = pcre_get_compiled_regex_cache(regex)) == NULL) {
@@ -2676,7 +2704,7 @@ static PHP_FUNCTION(preg_quote)
 	ZEND_PARSE_PARAMETERS_START(1, 2)
 		Z_PARAM_STR(str)
 		Z_PARAM_OPTIONAL
-		Z_PARAM_STR(delim)
+		Z_PARAM_STR_EX(delim, 1, 0)
 	ZEND_PARSE_PARAMETERS_END();
 
 	/* Nothing to do if we got an empty string */

@@ -1200,7 +1200,8 @@ PHP_FUNCTION(xml_set_object)
 	/* please leave this commented - or ask thies@thieso.net before doing it (again) */
 	/* zval_add_ref(&parser->object); */
 
-	ZVAL_COPY(&parser->object, mythis);
+	Z_ADDREF_P(mythis);
+	ZVAL_OBJ(&parser->object, Z_OBJ_P(mythis));
 
 	RETVAL_TRUE;
 }
@@ -1628,7 +1629,10 @@ PHP_FUNCTION(xml_parser_set_option)
 			break;
 		case PHP_XML_OPTION_TARGET_ENCODING: {
 			const xml_encoding *enc;
-			convert_to_string_ex(val);
+			if (!try_convert_to_string(val)) {
+				return;
+			}
+
 			enc = xml_get_encoding((XML_Char*)Z_STRVAL_P(val));
 			if (enc == NULL) {
 				php_error_docref(NULL, E_WARNING, "Unsupported target encoding \"%s\"", Z_STRVAL_P(val));

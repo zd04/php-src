@@ -291,8 +291,8 @@ PHP_ARG_WITH([custom-odbc],,
   [AS_HELP_STRING([[--with-custom-odbc[=DIR]]],
     [Include user defined ODBC support. DIR is ODBC install base directory
     [/usr/local]. Make sure to define CUSTOM_ODBC_LIBS and have some odbc.h in
-    your include dirs. f.e. you should define following for Sybase SQL Anywhere
-    5.5.00 on QNX, prior to running this configure script:
+    your include dirs. For example, you should define following for Sybase SQL
+    Anywhere 5.5.00 on QNX, prior to running this configure script:
     CPPFLAGS="-DODBC_QNX -DSQLANY_BUG" LDFLAGS=-lunix
     CUSTOM_ODBC_LIBS="-ldblib -lodbc"])])
 
@@ -362,9 +362,20 @@ PHP_ARG_WITH([unixODBC],,
 
   AC_MSG_CHECKING(whether to build with unixODBC support)
   if test "$PHP_UNIXODBC" != "no"; then
-    AC_MSG_RESULT(yes)
-    PKG_CHECK_MODULES([ODBC], [odbc])
-    PHP_EVAL_INCLINE($ODBC_CFLAGS)
+    if test "$PHP_UNIXODBC" = "yes"; then
+      AC_MSG_RESULT(yes from pkgconfig)
+      PKG_CHECK_MODULES([ODBC], [odbc])
+      PHP_EVAL_INCLINE($ODBC_CFLAGS)
+    else
+      dnl keep old DIR way for old version without libodbc.pc
+      ODBC_INCDIR=$PHP_UNIXODBC/include
+      ODBC_LIBDIR=$PHP_UNIXODBC/$PHP_LIBDIR
+      ODBC_LFLAGS=-L$ODBC_LIBDIR
+      ODBC_CFLAGS=-I$ODBC_INCDIR
+      ODBC_LIBS=-lodbc
+      PHP_ODBC_CHECK_HEADER(sqlext.h)
+      AC_MSG_RESULT(yes in $PHP_UNIXODBC)
+    fi
     ODBC_TYPE=unixODBC
     AC_DEFINE(HAVE_UNIXODBC,1,[ ])
   else

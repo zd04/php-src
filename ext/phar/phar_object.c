@@ -219,11 +219,7 @@ static int phar_file_action(phar_archive_data *phar, phar_entry_info *info, char
 				name_len = spprintf(&name, 4096, "phar://%s/%s", arch, entry);
 			}
 
-			file_handle.type = ZEND_HANDLE_FILENAME;
-			file_handle.handle.fd = 0;
-			file_handle.filename = name;
-			file_handle.opened_path = NULL;
-			file_handle.free_filename = 0;
+			zend_stream_init_filename(&file_handle, name);
 
 			PHAR_G(cwd) = NULL;
 			PHAR_G(cwd_len) = 0;
@@ -1275,10 +1271,8 @@ PHP_METHOD(Phar, getSupportedSignatures)
 
 	add_next_index_stringl(return_value, "MD5", 3);
 	add_next_index_stringl(return_value, "SHA-1", 5);
-#ifdef PHAR_HASH_OK
 	add_next_index_stringl(return_value, "SHA-256", 7);
 	add_next_index_stringl(return_value, "SHA-512", 7);
-#endif
 #if PHAR_HAVE_OPENSSL
 	add_next_index_stringl(return_value, "OpenSSL", 7);
 #else
@@ -2011,7 +2005,7 @@ static zend_object *phar_rename_archive(phar_archive_data **sphar, char *ext) /*
 	char *newname = NULL, *newpath = NULL;
 	zval ret, arg1;
 	zend_class_entry *ce;
-	char *error;
+	char *error = NULL;
 	const char *pcr_error;
 	size_t ext_len = ext ? strlen(ext) : 0;
 	size_t new_len, oldname_len, phar_ext_len;
@@ -2221,6 +2215,8 @@ its_ok:
 	phar_flush(phar, 0, 0, 1, &error);
 
 	if (error) {
+		zend_hash_str_del(&(PHAR_G(phar_fname_map)), newpath, phar->fname_len);
+		*sphar = NULL;
 		zend_throw_exception_ex(spl_ce_BadMethodCallException, 0, "%s", error);
 		efree(error);
 		efree(oldpath);
@@ -3061,11 +3057,6 @@ PHP_METHOD(Phar, setSignatureAlgorithm)
 	switch (algo) {
 		case PHAR_SIG_SHA256:
 		case PHAR_SIG_SHA512:
-#ifndef PHAR_HASH_OK
-			zend_throw_exception_ex(spl_ce_UnexpectedValueException, 0,
-				"SHA-256 and SHA-512 signatures are only supported if the hash extension is enabled and built non-shared");
-			return;
-#endif
 		case PHAR_SIG_MD5:
 		case PHAR_SIG_SHA1:
 		case PHAR_SIG_OPENSSL:

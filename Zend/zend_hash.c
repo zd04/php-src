@@ -258,6 +258,26 @@ ZEND_API HashTable* ZEND_FASTCALL _zend_new_array(uint32_t nSize)
 	return ht;
 }
 
+ZEND_API HashTable* ZEND_FASTCALL zend_new_pair(zval *val1, zval *val2)
+{
+	Bucket *p;
+	HashTable *ht = emalloc(sizeof(HashTable));
+	_zend_hash_init_int(ht, HT_MIN_SIZE, ZVAL_PTR_DTOR, 0);
+	ht->nNumUsed = ht->nNumOfElements = ht->nNextFreeElement = 2;
+	zend_hash_real_init_packed_ex(ht);
+
+	p = ht->arData;
+	ZVAL_COPY_VALUE(&p->val, val1);
+	p->h = 0;
+	p->key = NULL;
+
+	p++;
+	ZVAL_COPY_VALUE(&p->val, val2);
+	p->h = 1;
+	p->key = NULL;
+	return ht;
+}
+
 static void ZEND_FASTCALL zend_hash_packed_grow(HashTable *ht)
 {
 	HT_ASSERT_RC1(ht);
@@ -705,12 +725,13 @@ static zend_always_inline zval *_zend_hash_add_or_update_i(HashTable *ht, zend_s
 				zend_string_hash_val(key);
 			}
 		}
-	} else if ((flag & HASH_ADD_NEW) == 0) {
+	} else if ((flag & HASH_ADD_NEW) == 0 || ZEND_DEBUG) {
 		p = zend_hash_find_bucket(ht, key, 0);
 
 		if (p) {
 			zval *data;
 
+			ZEND_ASSERT((flag & HASH_ADD_NEW) == 0);
 			if (flag & HASH_ADD) {
 				if (!(flag & HASH_UPDATE_INDIRECT)) {
 					return NULL;
@@ -992,9 +1013,10 @@ convert_to_hash:
 		}
 		zend_hash_real_init_mixed(ht);
 	} else {
-		if ((flag & HASH_ADD_NEW) == 0) {
+		if ((flag & HASH_ADD_NEW) == 0 || ZEND_DEBUG) {
 			p = zend_hash_index_find_bucket(ht, h);
 			if (p) {
+				ZEND_ASSERT((flag & HASH_ADD_NEW) == 0);
 				goto replace;
 			}
 		}

@@ -1163,7 +1163,8 @@ zend_object_iterator *spl_array_get_iterator(zend_class_entry *ce, zval *object,
 
 	zend_iterator_init(&iterator->it);
 
-	ZVAL_COPY(&iterator->it.data, object);
+	Z_ADDREF_P(object);
+	ZVAL_OBJ(&iterator->it.data, Z_OBJ_P(object));
 	iterator->it.funcs = &spl_array_it_funcs;
 	iterator->ce = ce;
 	ZVAL_UNDEF(&iterator->value);
@@ -1874,11 +1875,6 @@ SPL_METHOD(Array, __unserialize)
 	if (flags & SPL_ARRAY_IS_SELF) {
 		zval_ptr_dtor(&intern->array);
 		ZVAL_UNDEF(&intern->array);
-	} else if (Z_TYPE_P(storage_zv) == IS_ARRAY) {
-		zval_ptr_dtor(&intern->array);
-		ZVAL_COPY_VALUE(&intern->array, storage_zv);
-		ZVAL_NULL(storage_zv);
-		SEPARATE_ARRAY(&intern->array);
 	} else {
 		spl_array_set_array(ZEND_THIS, intern, storage_zv, 0L, 1);
 	}

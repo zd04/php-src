@@ -65,6 +65,7 @@ typedef void OnigMatchParam;
 #define onig_new_match_param() (NULL)
 #define onig_initialize_match_param(x) (void)(x)
 #define onig_set_match_stack_limit_size_of_match_param(x, y)
+#define onig_set_retry_limit_in_match_of_match_param(x, y)
 #define onig_free_match_param(x)
 #define onig_search_with_param(reg, str, end, start, range, region, option, mp) \
 onig_search(reg, str, end, start, range, region, option)
@@ -410,6 +411,7 @@ ZEND_BEGIN_ARG_INFO_EX(arginfo_mb_decode_numericentity, 0, 0, 2)
 	ZEND_ARG_INFO(0, string)
 	ZEND_ARG_INFO(0, convmap)
 	ZEND_ARG_INFO(0, encoding)
+	ZEND_ARG_INFO(0, is_hex)
 ZEND_END_ARG_INFO()
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_mb_send_mail, 0, 0, 3)
@@ -444,6 +446,7 @@ ZEND_BEGIN_ARG_INFO_EX(arginfo_mb_chr, 0, 0, 1)
 	ZEND_ARG_INFO(0, encoding)
 ZEND_END_ARG_INFO()
 
+#if HAVE_MBREGEX
 ZEND_BEGIN_ARG_INFO_EX(arginfo_mb_regex_encoding, 0, 0, 0)
 	ZEND_ARG_INFO(0, encoding)
 ZEND_END_ARG_INFO()
@@ -527,6 +530,7 @@ ZEND_END_ARG_INFO()
 ZEND_BEGIN_ARG_INFO_EX(arginfo_mb_regex_set_options, 0, 0, 0)
 	ZEND_ARG_INFO(0, options)
 ZEND_END_ARG_INFO()
+#endif /* HAVE_MBREGEX */
 /* }}} */
 
 /* {{{ zend_function_entry mbstring_functions[] */
@@ -826,8 +830,13 @@ php_mb_parse_encoding_array(zval *array, const mbfl_encoding ***return_list, siz
 		bauto = 0;
 		n = 0;
 		ZEND_HASH_FOREACH_VAL(target_hash, hash_entry) {
-			convert_to_string_ex(hash_entry);
-			if (strcasecmp(Z_STRVAL_P(hash_entry), "auto") == 0) {
+			zend_string *encoding_str = zval_try_get_string(hash_entry);
+			if (UNEXPECTED(!encoding_str)) {
+				ret = FAILURE;
+				break;
+			}
+
+			if (strcasecmp(ZSTR_VAL(encoding_str), "auto") == 0) {
 				if (!bauto) {
 					const enum mbfl_no_encoding *src = MBSTRG(default_detect_order_list);
 					const size_t identify_list_size = MBSTRG(default_detect_order_list_size);
@@ -840,7 +849,7 @@ php_mb_parse_encoding_array(zval *array, const mbfl_encoding ***return_list, siz
 					}
 				}
 			} else {
-				const mbfl_encoding *encoding = mbfl_name2encoding(Z_STRVAL_P(hash_entry));
+				const mbfl_encoding *encoding = mbfl_name2encoding(ZSTR_VAL(encoding_str));
 				if (encoding) {
 					*entry++ = encoding;
 					n++;
@@ -849,6 +858,7 @@ php_mb_parse_encoding_array(zval *array, const mbfl_encoding ***return_list, siz
 				}
 			}
 			i--;
+			zend_string_release(encoding_str);
 		} ZEND_HASH_FOREACH_END();
 		if (n > 0) {
 			if (return_list) {
@@ -1019,6 +1029,9 @@ static int _php_mb_match_regex(void *opaque, const char *str, size_t str_len)
 	onig_initialize_match_param(mp);
 	if (!ZEND_LONG_UINT_OVFL(MBSTRG(regex_stack_limit))) {
 		onig_set_match_stack_limit_size_of_match_param(mp, (unsigned int)MBSTRG(regex_stack_limit));
+	}
+	if (!ZEND_LONG_UINT_OVFL(MBSTRG(regex_retry_limit))) {
+		onig_set_retry_limit_in_match_of_match_param(mp, (unsigned int)MBSTRG(regex_retry_limit));
 	}
 	/* search */
 	err = onig_search_with_param((php_mb_regex_t *)opaque, (const OnigUChar *)str,
@@ -1486,6 +1499,7 @@ PHP_INI_BEGIN()
 		strict_detection, zend_mbstring_globals, mbstring_globals)
 #if HAVE_MBREGEX
 	STD_PHP_INI_ENTRY("mbstring.regex_stack_limit", "100000",PHP_INI_ALL, OnUpdateLong, regex_stack_limit, zend_mbstring_globals, mbstring_globals)
+	STD_PHP_INI_ENTRY("mbstring.regex_retry_limit", "1000000",PHP_INI_ALL, OnUpdateLong, regex_retry_limit, zend_mbstring_globals, mbstring_globals)
 #endif
 PHP_INI_END()
 /* }}} */
@@ -2000,7 +2014,9 @@ PHP_FUNCTION(mb_detect_order)
 				}
 				break;
 			default:
-				convert_to_string_ex(arg1);
+				if (!try_convert_to_string(arg1)) {
+					return;
+				}
 				if (FAILURE == php_mb_parse_encoding_list(Z_STRVAL_P(arg1), Z_STRLEN_P(arg1), &list, &size, 0)) {
 					if (list) {
 						efree(list);
@@ -2590,6 +2606,9 @@ PHP_FUNCTION(mb_strrpos)
 					break;
 				default :
 					enc_name = Z_STR_P(zoffset);
+					php_error_docref(NULL, E_DEPRECATED,
+						"Passing the encoding as third parameter is deprecated. "
+						"Use an explicit zero offset");
 					break;
 			}
 		} else {
@@ -3328,7 +3347,9 @@ PHP_FUNCTION(mb_convert_encoding)
 	}
 
 	if (Z_TYPE_P(input) != IS_STRING && Z_TYPE_P(input) != IS_ARRAY) {
-		convert_to_string(input);
+		if (!try_convert_to_string(input)) {
+			return;
+		}
 	}
 
 	if (arg_old) {
@@ -3338,8 +3359,13 @@ PHP_FUNCTION(mb_convert_encoding)
 				_from_encodings = NULL;
 
 				ZEND_HASH_FOREACH_VAL(target_hash, hash_entry) {
-
-					convert_to_string_ex(hash_entry);
+					zend_string *encoding_str = zval_try_get_string(hash_entry);
+					if (UNEXPECTED(!encoding_str)) {
+						if (_from_encodings) {
+							efree(_from_encodings);
+						}
+						return;
+					}
 
 					if ( _from_encodings) {
 						l = strlen(_from_encodings);
@@ -3350,6 +3376,7 @@ PHP_FUNCTION(mb_convert_encoding)
 					} else {
 						_from_encodings = estrdup(Z_STRVAL_P(hash_entry));
 					}
+					zend_string_release(encoding_str);
 				} ZEND_HASH_FOREACH_END();
 
 				if (_from_encodings != NULL && !strlen(_from_encodings)) {
@@ -3359,7 +3386,10 @@ PHP_FUNCTION(mb_convert_encoding)
 				s_free = _from_encodings;
 				break;
 			default:
-				convert_to_string(arg_old);
+				if (!try_convert_to_string(arg_old)) {
+					return;
+				}
+
 				_from_encodings = Z_STRVAL_P(arg_old);
 				break;
 			}
@@ -3535,7 +3565,9 @@ PHP_FUNCTION(mb_detect_encoding)
 			}
 			break;
 		default:
-			convert_to_string(encoding_list);
+			if (!try_convert_to_string(encoding_list)) {
+				return;
+			}
 			if (FAILURE == php_mb_parse_encoding_list(Z_STRVAL_P(encoding_list), Z_STRLEN_P(encoding_list), &list, &size, 0)) {
 				if (list) {
 					efree(list);
@@ -3944,7 +3976,9 @@ PHP_FUNCTION(mb_convert_variables)
 			php_mb_parse_encoding_array(zfrom_enc, &elist, &elistsz, 0);
 			break;
 		default:
-			convert_to_string_ex(zfrom_enc);
+			if (!try_convert_to_string(zfrom_enc)) {
+				return;
+			}
 			php_mb_parse_encoding_list(Z_STRVAL_P(zfrom_enc), Z_STRLEN_P(zfrom_enc), &elist, &elistsz, 0);
 			break;
 	}
@@ -4923,27 +4957,17 @@ PHP_FUNCTION(mb_check_encoding)
 		RETURN_FALSE;
 	}
 
-	switch(Z_TYPE_P(input)) {
-		case IS_LONG:
-		case IS_DOUBLE:
-		case IS_NULL:
-		case IS_TRUE:
-		case IS_FALSE:
-			RETURN_TRUE;
-			break;
-		case IS_STRING:
-			if (!php_mb_check_encoding(Z_STRVAL_P(input), Z_STRLEN_P(input), enc ? ZSTR_VAL(enc): NULL)) {
-				RETURN_FALSE;
-			}
-			break;
-		case IS_ARRAY:
-			if (!php_mb_check_encoding_recursive(Z_ARRVAL_P(input), enc)) {
-				RETURN_FALSE;
-			}
-			break;
-		default:
-			php_error_docref(NULL, E_WARNING, "Input is something other than scalar or array");
+	if (Z_TYPE_P(input) == IS_ARRAY) {
+		if (!php_mb_check_encoding_recursive(HASH_OF(input), enc)) {
 			RETURN_FALSE;
+		}
+	} else {
+		if (!try_convert_to_string(input)) {
+			RETURN_FALSE;
+		}
+		if (!php_mb_check_encoding(Z_STRVAL_P(input), Z_STRLEN_P(input), enc ? ZSTR_VAL(enc): NULL)) {
+			RETURN_FALSE;
+		}
 	}
 	RETURN_TRUE;
 }

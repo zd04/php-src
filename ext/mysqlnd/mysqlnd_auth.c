@@ -420,6 +420,9 @@ mysqlnd_auth_change_user(MYSQLND_CONN_DATA * const conn,
 		auth_packet.auth_data_len = auth_plugin_data_len;
 		auth_packet.auth_plugin_name = auth_protocol;
 
+        if (conn->server_capabilities & CLIENT_CONNECT_ATTRS) {
+			auth_packet.connect_attr = conn->options->connect_attr;
+        }
 
 		if (conn->m->get_server_version(conn) >= 50123) {
 			auth_packet.charset_no	= conn->charset->nr;
@@ -807,6 +810,7 @@ mysqlnd_sha256_auth_get_auth_data(struct st_mysqlnd_authentication_plugin * self
 			*auth_data_len = server_public_key_len;
 			ret = malloc(*auth_data_len);
 			RSA_public_encrypt(passwd_len + 1, (zend_uchar *) xor_str, ret, server_public_key, RSA_PKCS1_OAEP_PADDING);
+			RSA_free(server_public_key);
 		}
 	}
 

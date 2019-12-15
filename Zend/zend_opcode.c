@@ -102,6 +102,26 @@ ZEND_API void destroy_zend_function(zend_function *function)
 	zend_function_dtor(&tmp);
 }
 
+void zend_free_internal_arg_info(zend_internal_function *function) {
+	if ((function->fn_flags & (ZEND_ACC_HAS_RETURN_TYPE|ZEND_ACC_HAS_TYPE_HINTS)) &&
+		function->arg_info) {
+
+		uint32_t i;
+		uint32_t num_args = function->num_args + 1;
+		zend_internal_arg_info *arg_info = function->arg_info - 1;
+
+		if (function->fn_flags & ZEND_ACC_VARIADIC) {
+			num_args++;
+		}
+		for (i = 0 ; i < num_args; i++) {
+			if (ZEND_TYPE_IS_CLASS(arg_info[i].type)) {
+				zend_string_release_ex(ZEND_TYPE_NAME(arg_info[i].type), 1);
+			}
+		}
+		free(arg_info);
+	}
+}
+
 ZEND_API void zend_function_dtor(zval *zv)
 {
 	zend_function *function = Z_PTR_P(zv);
@@ -115,22 +135,9 @@ ZEND_API void zend_function_dtor(zval *zv)
 		ZEND_ASSERT(function->common.function_name);
 		zend_string_release_ex(function->common.function_name, 1);
 
-		if ((function->common.fn_flags & (ZEND_ACC_HAS_RETURN_TYPE|ZEND_ACC_HAS_TYPE_HINTS)) &&
-		    !function->common.scope && function->common.arg_info) {
-
-			uint32_t i;
-			uint32_t num_args = function->common.num_args + 1;
-			zend_arg_info *arg_info = function->common.arg_info - 1;
-
-			if (function->common.fn_flags & ZEND_ACC_VARIADIC) {
-				num_args++;
-			}
-			for (i = 0 ; i < num_args; i++) {
-				if (ZEND_TYPE_IS_CLASS(arg_info[i].type)) {
-					zend_string_release_ex(ZEND_TYPE_NAME(arg_info[i].type), 1);
-				}
-			}
-			free(arg_info);
+		/* For methods this will be called explicitly. */
+		if (!function->common.scope) {
+			zend_free_internal_arg_info(&function->internal_function);
 		}
 
 		if (!(function->common.fn_flags & ZEND_ACC_ARENA_ALLOCATED)) {
@@ -145,22 +152,42 @@ ZEND_API void zend_cleanup_internal_class_data(zend_class_entry *ce)
 		zval *static_members = CE_STATIC_MEMBERS(ce);
 		zval *p = static_members;
 		zval *end = p + ce->default_static_members_count;
-
-		ZEND_MAP_PTR_SET(ce->static_members_table, NULL);
-		while (p != end) {
-			if (UNEXPECTED(Z_ISREF_P(p))) {
-				zend_property_info *prop_info;
-				ZEND_REF_FOREACH_TYPE_SOURCES(Z_REF_P(p), prop_info) {
-					if (prop_info->ce == ce && p - static_members == prop_info->offset) {
-						ZEND_REF_DEL_TYPE_SOURCE(Z_REF_P(p), prop_info);
-						break; /* stop iteration here, the array might be realloc()'ed */
-					}
-				} ZEND_REF_FOREACH_TYPE_SOURCES_END();
+		if (UNEXPECTED(ZEND_MAP_PTR(ce->static_members_table) == &ce->default_static_members_table)) {
+			/* Special case: If this is a static property on a dl'ed internal class, then the
+			 * static property table and the default property table are the same. In this case we
+			 * destroy the values here, but leave behind valid UNDEF zvals and don't free the
+			 * table itself. */
+			while (p != end) {
+				if (UNEXPECTED(Z_ISREF_P(p))) {
+					zend_property_info *prop_info;
+					ZEND_REF_FOREACH_TYPE_SOURCES(Z_REF_P(p), prop_info) {
+						if (prop_info->ce == ce && p - static_members == prop_info->offset) {
+							ZEND_REF_DEL_TYPE_SOURCE(Z_REF_P(p), prop_info);
+							break; /* stop iteration here, the array might be realloc()'ed */
+						}
+					} ZEND_REF_FOREACH_TYPE_SOURCES_END();
+				}
+				i_zval_ptr_dtor(p);
+				ZVAL_UNDEF(p);
+				p++;
 			}
-			i_zval_ptr_dtor(p);
-			p++;
+		} else {
+			ZEND_MAP_PTR_SET(ce->static_members_table, NULL);
+			while (p != end) {
+				if (UNEXPECTED(Z_ISREF_P(p))) {
+					zend_property_info *prop_info;
+					ZEND_REF_FOREACH_TYPE_SOURCES(Z_REF_P(p), prop_info) {
+						if (prop_info->ce == ce && p - static_members == prop_info->offset) {
+							ZEND_REF_DEL_TYPE_SOURCE(Z_REF_P(p), prop_info);
+							break; /* stop iteration here, the array might be realloc()'ed */
+						}
+					} ZEND_REF_FOREACH_TYPE_SOURCES_END();
+				}
+				i_zval_ptr_dtor(p);
+				p++;
+			}
+			efree(static_members);
 		}
-		efree(static_members);
 	}
 }
 
@@ -219,7 +246,7 @@ ZEND_API void destroy_zend_class(zval *zv)
 	zend_class_entry *ce = Z_PTR_P(zv);
 	zend_function *fn;
 
-	if (ce->ce_flags & ZEND_ACC_IMMUTABLE) {
+	if (ce->ce_flags & (ZEND_ACC_IMMUTABLE|ZEND_ACC_PRELOADED)) {
 		zend_op_array *op_array;
 
 		if (ce->default_static_members_count) {
@@ -238,7 +265,7 @@ ZEND_API void destroy_zend_class(zval *zv)
 	}
 	switch (ce->type) {
 		case ZEND_USER_CLASS:
-			if (ce->parent_name && !(ce->ce_flags & (ZEND_ACC_LINKED|ZEND_ACC_LINKING_IN_PROGRESS))) {
+			if (ce->parent_name && !(ce->ce_flags & ZEND_ACC_RESOLVED_PARENT)) {
 				zend_string_release_ex(ce->parent_name, 0);
 			}
 			if (ce->default_properties_table) {
@@ -298,7 +325,7 @@ ZEND_API void destroy_zend_class(zval *zv)
 			}
 			zend_hash_destroy(&ce->constants_table);
 			if (ce->num_interfaces > 0) {
-				if (!(ce->ce_flags & (ZEND_ACC_LINKED|ZEND_ACC_LINKING_IN_PROGRESS))) {
+				if (!(ce->ce_flags & ZEND_ACC_RESOLVED_INTERFACES)) {
 					uint32_t i;
 
 					for (i = 0; i < ce->num_interfaces; i++) {
@@ -348,8 +375,7 @@ ZEND_API void destroy_zend_class(zval *zv)
 			ZEND_HASH_FOREACH_PTR(&ce->function_table, fn) {
 				if ((fn->common.fn_flags & (ZEND_ACC_HAS_RETURN_TYPE|ZEND_ACC_HAS_TYPE_HINTS)) &&
 				    fn->common.scope == ce) {
-					/* reset function scope to allow arg_info removing */
-					fn->common.scope = NULL;
+					zend_free_internal_arg_info(&fn->internal_function);
 				}
 			} ZEND_HASH_FOREACH_END();
 
@@ -585,7 +611,6 @@ static void emit_live_range(
 		/* Classes don't have to be destroyed. */
 		case ZEND_FETCH_CLASS:
 		case ZEND_DECLARE_ANON_CLASS:
-		case ZEND_DECLARE_ANON_INHERITED_CLASS:
 		/* FAST_CALLs don't have to be destroyed. */
 		case ZEND_FAST_CALL:
 			return;
@@ -650,6 +675,12 @@ static void emit_live_range(
 		default:
 			start++;
 			kind = ZEND_LIVE_TMPVAR;
+
+			/* Check hook to determine whether a live range is necessary,
+			 * e.g. based on type info. */
+			if (needs_live_range && !needs_live_range(op_array, orig_def_opline)) {
+				return;
+			}
 			break;
 		}
 		case ZEND_COPY_TMP:
@@ -687,11 +718,6 @@ static void emit_live_range(
 			emit_live_range_raw(op_array, var_num, kind, start, end);
 			return;
 		}
-	}
-
-	/* Check hook to determine whether a live range is necessary, e.g. based on type info. */
-	if (needs_live_range && !needs_live_range(op_array, orig_def_opline)) {
-		return;
 	}
 
 	emit_live_range_raw(op_array, var_num, kind, start, end);
@@ -956,8 +982,6 @@ ZEND_API int pass_two(zend_op_array *op_array)
 				ZEND_PASS_TWO_UPDATE_JMP_TARGET(op_array, opline, opline->op2);
 				break;
 			}
-			case ZEND_DECLARE_ANON_CLASS:
-			case ZEND_DECLARE_ANON_INHERITED_CLASS:
 			case ZEND_FE_FETCH_R:
 			case ZEND_FE_FETCH_RW:
 				/* absolute index to relative offset */
@@ -1026,33 +1050,24 @@ ZEND_API binary_op_type get_binary_op(int opcode)
 {
 	switch (opcode) {
 		case ZEND_ADD:
-		case ZEND_ASSIGN_ADD:
 			return (binary_op_type) add_function;
 		case ZEND_SUB:
-		case ZEND_ASSIGN_SUB:
 			return (binary_op_type) sub_function;
 		case ZEND_MUL:
-		case ZEND_ASSIGN_MUL:
 			return (binary_op_type) mul_function;
 		case ZEND_POW:
-		case ZEND_ASSIGN_POW:
 			return (binary_op_type) pow_function;
 		case ZEND_DIV:
-		case ZEND_ASSIGN_DIV:
 			return (binary_op_type) div_function;
 		case ZEND_MOD:
-		case ZEND_ASSIGN_MOD:
 			return (binary_op_type) mod_function;
 		case ZEND_SL:
-		case ZEND_ASSIGN_SL:
 			return (binary_op_type) shift_left_function;
 		case ZEND_SR:
-		case ZEND_ASSIGN_SR:
 			return (binary_op_type) shift_right_function;
 		case ZEND_PARENTHESIZED_CONCAT:
 		case ZEND_FAST_CONCAT:
 		case ZEND_CONCAT:
-		case ZEND_ASSIGN_CONCAT:
 			return (binary_op_type) concat_function;
 		case ZEND_IS_IDENTICAL:
 			return (binary_op_type) is_identical_function;
@@ -1070,17 +1085,15 @@ ZEND_API binary_op_type get_binary_op(int opcode)
 		case ZEND_SPACESHIP:
 			return (binary_op_type) compare_function;
 		case ZEND_BW_OR:
-		case ZEND_ASSIGN_BW_OR:
 			return (binary_op_type) bitwise_or_function;
 		case ZEND_BW_AND:
-		case ZEND_ASSIGN_BW_AND:
 			return (binary_op_type) bitwise_and_function;
 		case ZEND_BW_XOR:
-		case ZEND_ASSIGN_BW_XOR:
 			return (binary_op_type) bitwise_xor_function;
 		case ZEND_BOOL_XOR:
 			return (binary_op_type) boolean_xor_function;
 		default:
+			ZEND_ASSERT(0);
 			return (binary_op_type) NULL;
 	}
 }

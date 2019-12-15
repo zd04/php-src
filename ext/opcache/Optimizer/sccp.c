@@ -222,18 +222,10 @@ static zend_bool can_replace_op1(
 		case ZEND_ASSIGN_DIM:
 		case ZEND_ASSIGN_OBJ:
 		case ZEND_ASSIGN_OBJ_REF:
-		case ZEND_ASSIGN_ADD:
-		case ZEND_ASSIGN_SUB:
-		case ZEND_ASSIGN_MUL:
-		case ZEND_ASSIGN_DIV:
-		case ZEND_ASSIGN_MOD:
-		case ZEND_ASSIGN_SL:
-		case ZEND_ASSIGN_SR:
-		case ZEND_ASSIGN_CONCAT:
-		case ZEND_ASSIGN_BW_OR:
-		case ZEND_ASSIGN_BW_AND:
-		case ZEND_ASSIGN_BW_XOR:
-		case ZEND_ASSIGN_POW:
+		case ZEND_ASSIGN_OP:
+		case ZEND_ASSIGN_DIM_OP:
+		case ZEND_ASSIGN_OBJ_OP:
+		case ZEND_ASSIGN_STATIC_PROP_OP:
 		case ZEND_FETCH_DIM_W:
 		case ZEND_FETCH_DIM_RW:
 		case ZEND_FETCH_DIM_UNSET:
@@ -287,9 +279,7 @@ static zend_bool can_replace_op2(
 		const zend_op_array *op_array, zend_op *opline, zend_ssa_op *ssa_op) {
 	switch (opline->opcode) {
 		/* Do not accept CONST */
-		case ZEND_DECLARE_INHERITED_CLASS:
-		case ZEND_DECLARE_INHERITED_CLASS_DELAYED:
-		case ZEND_DECLARE_ANON_INHERITED_CLASS:
+		case ZEND_DECLARE_CLASS_DELAYED:
 		case ZEND_BIND_LEXICAL:
 		case ZEND_FE_FETCH_R:
 		case ZEND_FE_FETCH_RW:
@@ -1207,9 +1197,18 @@ static void sccp_visit_instr(scdf_ctx *scdf, zend_op *opline, zend_ssa_op *ssa_o
 			if (ssa_op->op1_def >= 0
 					&& ctx->scdf.ssa->vars[ssa_op->op1_def].escape_state == ESCAPE_STATE_NO_ESCAPE) {
 				zval *data = get_op1_value(ctx, opline+1, ssa_op+1);
+				zend_ssa_var_info *var_info = &ctx->scdf.ssa->var_info[ssa_op->op1_use];
+
+				/* Don't try to propagate assignments to (potentially) typed properties. We would
+				 * need to deal with errors and type conversions first. */
+				if (!var_info->ce || (var_info->ce->ce_flags & ZEND_ACC_HAS_TYPE_HINTS)) {
+					SET_RESULT_BOT(result);
+					SET_RESULT_BOT(op1);
+					return;
+				}
 
 				/* If $a in $a->foo=$c is UNDEF, treat it like NULL. There is no warning. */
-				if ((ctx->scdf.ssa->var_info[ssa_op->op1_use].type & MAY_BE_ANY) == 0) {
+				if ((var_info->type & MAY_BE_ANY) == 0) {
 					op1 = &EG(uninitialized_zval);
 				}
 
@@ -1431,6 +1430,17 @@ static void sccp_visit_instr(scdf_ctx *scdf, zend_op *opline, zend_ssa_op *ssa_o
 				SET_RESULT_BOT(result);
 			}
 			return;
+		case ZEND_ASSIGN_STATIC_PROP_REF:
+		case ZEND_ASSIGN_OBJ_REF:
+			/* Handled here because we also need to BOT the OP_DATA operand, while the generic
+			 * code below will not do so. */
+			SET_RESULT_BOT(result);
+			SET_RESULT_BOT(op1);
+			SET_RESULT_BOT(op2);
+			opline++;
+			ssa_op++;
+			SET_RESULT_BOT(op1);
+			break;
 	}
 
 	if ((op1 && IS_BOT(op1)) || (op2 && IS_BOT(op2))) {
@@ -1474,32 +1484,24 @@ static void sccp_visit_instr(scdf_ctx *scdf, zend_op *opline, zend_ssa_op *ssa_o
 			}
 			SET_RESULT_BOT(result);
 			break;
-		case ZEND_ASSIGN_ADD:
-		case ZEND_ASSIGN_SUB:
-		case ZEND_ASSIGN_MUL:
-		case ZEND_ASSIGN_DIV:
-		case ZEND_ASSIGN_MOD:
-		case ZEND_ASSIGN_SL:
-		case ZEND_ASSIGN_SR:
-		case ZEND_ASSIGN_CONCAT:
-		case ZEND_ASSIGN_BW_OR:
-		case ZEND_ASSIGN_BW_AND:
-		case ZEND_ASSIGN_BW_XOR:
-		case ZEND_ASSIGN_POW:
+		case ZEND_ASSIGN_OP:
+		case ZEND_ASSIGN_DIM_OP:
+		case ZEND_ASSIGN_OBJ_OP:
+		case ZEND_ASSIGN_STATIC_PROP_OP:
 			if (op1) {
 				SKIP_IF_TOP(op1);
 			}
 			if (op2) {
 				SKIP_IF_TOP(op2);
 			}
-			if (opline->extended_value == 0) {
-				if (ct_eval_binary_op(&zv, zend_compound_assign_to_binary_op(opline->opcode), op1, op2) == SUCCESS) {
+			if (opline->opcode == ZEND_ASSIGN_OP) {
+				if (ct_eval_binary_op(&zv, opline->extended_value, op1, op2) == SUCCESS) {
 					SET_RESULT(op1, &zv);
 					SET_RESULT(result, &zv);
 					zval_ptr_dtor_nogc(&zv);
 					break;
 				}
-			} else if (opline->extended_value == ZEND_ASSIGN_DIM) {
+			} else if (opline->opcode == ZEND_ASSIGN_DIM_OP) {
 				if ((IS_PARTIAL_ARRAY(op1) || Z_TYPE_P(op1) == IS_ARRAY)
 						&& ssa_op->op1_def >= 0 && op2) {
 					zval tmp;
@@ -1518,7 +1520,7 @@ static void sccp_visit_instr(scdf_ctx *scdf, zend_op *opline, zend_ssa_op *ssa_o
 							break;
 						}
 
-						if (ct_eval_binary_op(&tmp, zend_compound_assign_to_binary_op(opline->opcode), &tmp, data) != SUCCESS) {
+						if (ct_eval_binary_op(&tmp, opline->extended_value, &tmp, data) != SUCCESS) {
 							SET_RESULT_BOT(result);
 							SET_RESULT_BOT(op1);
 							zval_ptr_dtor_nogc(&tmp);
@@ -1543,7 +1545,7 @@ static void sccp_visit_instr(scdf_ctx *scdf, zend_op *opline, zend_ssa_op *ssa_o
 						zval_ptr_dtor_nogc(&zv);
 					}
 				}
-			} else if (opline->extended_value == ZEND_ASSIGN_OBJ) {
+			} else if (opline->opcode == ZEND_ASSIGN_OBJ_OP) {
 				if (op1 && IS_PARTIAL_OBJECT(op1)
 						&& ssa_op->op1_def >= 0
 						&& ctx->scdf.ssa->vars[ssa_op->op1_def].escape_state == ESCAPE_STATE_NO_ESCAPE) {
@@ -1563,7 +1565,7 @@ static void sccp_visit_instr(scdf_ctx *scdf, zend_op *opline, zend_ssa_op *ssa_o
 							break;
 						}
 
-						if (ct_eval_binary_op(&tmp, zend_compound_assign_to_binary_op(opline->opcode), &tmp, data) != SUCCESS) {
+						if (ct_eval_binary_op(&tmp, opline->extended_value, &tmp, data) != SUCCESS) {
 							SET_RESULT_BOT(result);
 							SET_RESULT_BOT(op1);
 							zval_ptr_dtor_nogc(&tmp);
@@ -1584,11 +1586,6 @@ static void sccp_visit_instr(scdf_ctx *scdf, zend_op *opline, zend_ssa_op *ssa_o
 						zval_ptr_dtor_nogc(&zv);
 					}
 				}
-			} else if (opline->extended_value == ZEND_ASSIGN_STATIC_PROP) {
-				SET_RESULT_BOT(result);
-				break;
-			} else {
-				ZEND_ASSERT(0 && "Invalid compound assignment kind");
 			}
 			SET_RESULT_BOT(result);
 			SET_RESULT_BOT(op1);
@@ -1906,16 +1903,6 @@ static void sccp_visit_instr(scdf_ctx *scdf, zend_op *opline, zend_ssa_op *ssa_o
 			SET_RESULT_BOT(result);
 			break;
 		}
-		case ZEND_ASSIGN_STATIC_PROP_REF:
-		case ZEND_ASSIGN_OBJ_REF:
-			SET_RESULT_BOT(result);
-			SET_RESULT_BOT(op1);
-			SET_RESULT_BOT(op2);
-			opline++;
-			ssa_op++;
-			op1 = get_op1_value(ctx, opline, ssa_op);
-			SET_RESULT_BOT(op1);
-			break;
 		default:
 		{
 			/* If we have no explicit implementation return BOT */
@@ -1940,8 +1927,6 @@ static void sccp_mark_feasible_successors(
 	switch (opline->opcode) {
 		case ZEND_ASSERT_CHECK:
 		case ZEND_CATCH:
-		case ZEND_DECLARE_ANON_CLASS:
-		case ZEND_DECLARE_ANON_INHERITED_CLASS:
 		case ZEND_FE_FETCH_R:
 		case ZEND_FE_FETCH_RW:
 			scdf_mark_edge_feasible(scdf, block_num, block->successors[0]);
@@ -2321,6 +2306,15 @@ static int try_remove_definition(sccp_ctx *ctx, int var_num, zend_ssa_var *var, 
 				zend_ssa_remove_result_def(ssa, ssa_op);
 				if (opline->opcode == ZEND_DO_ICALL) {
 					removed_ops = remove_call(ctx, opline, ssa_op);
+				} else if (opline->opcode == ZEND_TYPE_CHECK
+						&& opline->op1_type & (IS_VAR|IS_TMP_VAR)
+						&& !value_known(&ctx->values[ssa_op->op1_use])) {
+					/* For TYPE_CHECK we may compute the result value without knowing the
+					 * operand, based on type inference information. Make sure the operand is
+					 * freed and leave further cleanup to DCE. */
+					opline->opcode = ZEND_FREE;
+					opline->result_type = IS_UNUSED;
+					removed_ops++;
 				} else {
 					zend_ssa_remove_instr(ssa, opline, ssa_op);
 					removed_ops++;
@@ -2334,18 +2328,10 @@ static int try_remove_definition(sccp_ctx *ctx, int var_num, zend_ssa_var *var, 
 				switch (opline->opcode) {
 					case ZEND_ASSIGN_DIM:
 					case ZEND_ASSIGN_OBJ:
-					case ZEND_ASSIGN_ADD:
-					case ZEND_ASSIGN_SUB:
-					case ZEND_ASSIGN_MUL:
-					case ZEND_ASSIGN_DIV:
-					case ZEND_ASSIGN_MOD:
-					case ZEND_ASSIGN_SL:
-					case ZEND_ASSIGN_SR:
-					case ZEND_ASSIGN_CONCAT:
-					case ZEND_ASSIGN_BW_OR:
-					case ZEND_ASSIGN_BW_AND:
-					case ZEND_ASSIGN_BW_XOR:
-					case ZEND_ASSIGN_POW:
+					case ZEND_ASSIGN_OP:
+					case ZEND_ASSIGN_DIM_OP:
+					case ZEND_ASSIGN_OBJ_OP:
+					case ZEND_ASSIGN_STATIC_PROP_OP:
 						if ((ssa_op->op2_use >= 0 && !value_known(&ctx->values[ssa_op->op2_use]))
 								|| ((ssa_op+1)->op1_use >= 0 &&!value_known(&ctx->values[(ssa_op+1)->op1_use]))) {
 							return 0;
@@ -2398,22 +2384,11 @@ static int try_remove_definition(sccp_ctx *ctx, int var_num, zend_ssa_var *var, 
 					removed_ops++;
 					zend_ssa_remove_instr(ssa, opline + 1, ssa_op + 1);
 					break;
-				case ZEND_ASSIGN_ADD:
-				case ZEND_ASSIGN_SUB:
-				case ZEND_ASSIGN_MUL:
-				case ZEND_ASSIGN_DIV:
-				case ZEND_ASSIGN_MOD:
-				case ZEND_ASSIGN_SL:
-				case ZEND_ASSIGN_SR:
-				case ZEND_ASSIGN_CONCAT:
-				case ZEND_ASSIGN_BW_OR:
-				case ZEND_ASSIGN_BW_AND:
-				case ZEND_ASSIGN_BW_XOR:
-				case ZEND_ASSIGN_POW:
-					if (opline->extended_value) {
-						removed_ops++;
-						zend_ssa_remove_instr(ssa, opline + 1, ssa_op + 1);
-					}
+				case ZEND_ASSIGN_DIM_OP:
+				case ZEND_ASSIGN_OBJ_OP:
+				case ZEND_ASSIGN_STATIC_PROP_OP:
+					removed_ops++;
+					zend_ssa_remove_instr(ssa, opline + 1, ssa_op + 1);
 					break;
 				default:
 					break;

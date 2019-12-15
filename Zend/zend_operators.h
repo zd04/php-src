@@ -63,7 +63,7 @@ ZEND_API int ZEND_FASTCALL is_not_equal_function(zval *result, zval *op1, zval *
 ZEND_API int ZEND_FASTCALL is_smaller_function(zval *result, zval *op1, zval *op2);
 ZEND_API int ZEND_FASTCALL is_smaller_or_equal_function(zval *result, zval *op1, zval *op2);
 
-ZEND_API zend_bool ZEND_FASTCALL instanceof_function_ex(const zend_class_entry *instance_ce, const zend_class_entry *ce, zend_bool interfaces_only);
+ZEND_API zend_bool ZEND_FASTCALL instanceof_function_ex(const zend_class_entry *instance_ce, const zend_class_entry *ce, zend_bool is_interface);
 ZEND_API zend_bool ZEND_FASTCALL instanceof_function(const zend_class_entry *instance_ce, const zend_class_entry *ce);
 
 /**
@@ -87,10 +87,10 @@ ZEND_API const char* ZEND_FASTCALL zend_memnstr_ex(const char *haystack, const c
 ZEND_API const char* ZEND_FASTCALL zend_memnrstr_ex(const char *haystack, const char *needle, size_t needle_len, const char *end);
 
 #if SIZEOF_ZEND_LONG == 4
-#	define ZEND_DOUBLE_FITS_LONG(d) (!((d) > ZEND_LONG_MAX || (d) < ZEND_LONG_MIN))
+#	define ZEND_DOUBLE_FITS_LONG(d) (!((d) > (double)ZEND_LONG_MAX || (d) < (double)ZEND_LONG_MIN))
 #else
 	/* >= as (double)ZEND_LONG_MAX is outside signed range */
-#	define ZEND_DOUBLE_FITS_LONG(d) (!((d) >= ZEND_LONG_MAX || (d) < ZEND_LONG_MIN))
+#	define ZEND_DOUBLE_FITS_LONG(d) (!((d) >= (double)ZEND_LONG_MAX || (d) < (double)ZEND_LONG_MIN))
 #endif
 
 #if ZEND_DVAL_TO_LVAL_CAST_OK
@@ -225,10 +225,12 @@ zend_memnrstr(const char *haystack, const char *needle, size_t needle_len, const
 		p -= needle_len;
 
 		do {
-			if ((p = (const char *)zend_memrchr(haystack, *needle, (p - haystack) + 1)) && ne == p[needle_len-1]) {
-				if (!memcmp(needle + 1, p + 1, needle_len - 2)) {
-					return p;
-				}
+			p = (const char *)zend_memrchr(haystack, *needle, (p - haystack) + 1);
+			if (!p) {
+				return NULL;
+			}
+			if (ne == p[needle_len-1] && !memcmp(needle + 1, p + 1, needle_len - 2)) {
+				return p;
 			}
 		} while (p-- >= haystack);
 
@@ -258,6 +260,7 @@ ZEND_API void multi_convert_to_string_ex(int argc, ...);
 ZEND_API zend_long    ZEND_FASTCALL zval_get_long_func(zval *op);
 ZEND_API double       ZEND_FASTCALL zval_get_double_func(zval *op);
 ZEND_API zend_string* ZEND_FASTCALL zval_get_string_func(zval *op);
+ZEND_API zend_string* ZEND_FASTCALL zval_try_get_string_func(zval *op);
 
 static zend_always_inline zend_long zval_get_long(zval *op) {
 	return EXPECTED(Z_TYPE_P(op) == IS_LONG) ? Z_LVAL_P(op) : zval_get_long_func(op);
@@ -281,6 +284,39 @@ static zend_always_inline void zend_tmp_string_release(zend_string *tmp) {
 	if (UNEXPECTED(tmp)) {
 		zend_string_release_ex(tmp, 0);
 	}
+}
+
+/* Like zval_get_string, but returns NULL if the conversion fails with an exception. */
+static zend_always_inline zend_string *zval_try_get_string(zval *op) {
+	if (EXPECTED(Z_TYPE_P(op) == IS_STRING)) {
+		zend_string *ret = zend_string_copy(Z_STR_P(op));
+		ZEND_ASSUME(ret != NULL);
+		return ret;
+	} else {
+		return zval_try_get_string_func(op);
+	}
+}
+
+/* Like zval_get_tmp_string, but returns NULL if the conversion fails with an exception. */
+static zend_always_inline zend_string *zval_try_get_tmp_string(zval *op, zend_string **tmp) {
+	if (EXPECTED(Z_TYPE_P(op) == IS_STRING)) {
+		zend_string *ret = Z_STR_P(op);
+		*tmp = NULL;
+		ZEND_ASSUME(ret != NULL);
+		return ret;
+	} else {
+		return *tmp = zval_try_get_string_func(op);
+	}
+}
+
+/* Like convert_to_string(), but returns whether the conversion succeeded and does not modify the
+ * zval in-place if it fails. */
+ZEND_API zend_bool ZEND_FASTCALL _try_convert_to_string(zval *op);
+static zend_always_inline zend_bool try_convert_to_string(zval *op) {
+	if (Z_TYPE_P(op) == IS_STRING) {
+		return 1;
+	}
+	return _try_convert_to_string(op);
 }
 
 /* Compatibility macros for 7.2 and below */
@@ -358,9 +394,7 @@ ZEND_API int ZEND_FASTCALL numeric_compare_function(zval *op1, zval *op2);
 ZEND_API int ZEND_FASTCALL string_compare_function_ex(zval *op1, zval *op2, zend_bool case_insensitive);
 ZEND_API int ZEND_FASTCALL string_compare_function(zval *op1, zval *op2);
 ZEND_API int ZEND_FASTCALL string_case_compare_function(zval *op1, zval *op2);
-#if HAVE_STRCOLL
 ZEND_API int ZEND_FASTCALL string_locale_compare_function(zval *op1, zval *op2);
-#endif
 
 ZEND_API void         ZEND_FASTCALL zend_str_tolower(char *str, size_t length);
 ZEND_API char*        ZEND_FASTCALL zend_str_tolower_copy(char *dest, const char *source, size_t length);

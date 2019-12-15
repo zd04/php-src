@@ -557,7 +557,7 @@ again:
 					zend_release_properties(myht);
 					return;
 				} else {
-					GC_PROTECT_RECURSION(myht);
+					GC_TRY_PROTECT_RECURSION(myht);
 				}
 			}
 			if (level > 1) {
@@ -577,7 +577,7 @@ again:
 				ZEND_HASH_FOREACH_KEY_VAL_IND(myht, index, key, val) {
 					php_object_element_export(val, index, key, level, buf);
 				} ZEND_HASH_FOREACH_END();
-				GC_UNPROTECT_RECURSION(myht);
+				GC_TRY_UNPROTECT_RECURSION(myht);
 				zend_release_properties(myht);
 			}
 			if (level > 1) {
@@ -947,7 +947,8 @@ again:
 					zval *data;
 					zend_ulong index;
 
-					ZVAL_COPY(&obj, struc);
+					Z_ADDREF_P(struc);
+					ZVAL_OBJ(&obj, Z_OBJ_P(struc));
 					if (php_var_serialize_call_magic_serialize(&retval, &obj) == FAILURE) {
 						if (!EG(exception)) {
 							smart_str_appendl(buf, "N;", 2);
@@ -1009,7 +1010,9 @@ again:
 
 				if (ce != PHP_IC_ENTRY && zend_hash_str_exists(&ce->function_table, "__sleep", sizeof("__sleep")-1)) {
 					zval retval, tmp;
-					ZVAL_COPY(&tmp, struc);
+					
+					Z_ADDREF_P(struc);
+					ZVAL_OBJ(&tmp, Z_OBJ_P(struc));
 
 					if (php_var_serialize_call_sleep(&retval, &tmp) == FAILURE) {
 						if (!EG(exception)) {
@@ -1171,7 +1174,7 @@ PHP_FUNCTION(serialize)
 }
 /* }}} */
 
-/* {{{ proto mixed unserialize(string variable_representation[, array allowed_classes])
+/* {{{ proto mixed unserialize(string variable_representation[, array options])
    Takes a string representation of variable and recreates it */
 PHP_FUNCTION(unserialize)
 {
@@ -1179,9 +1182,10 @@ PHP_FUNCTION(unserialize)
 	size_t buf_len;
 	const unsigned char *p;
 	php_unserialize_data_t var_hash;
-	zval *options = NULL, *classes = NULL;
+	zval *options = NULL;
 	zval *retval;
 	HashTable *class_hash = NULL, *prev_class_hash;
+	zend_long prev_max_depth, prev_cur_depth;
 
 	ZEND_PARSE_PARAMETERS_START(1, 2)
 		Z_PARAM_STRING(buf, buf_len)
@@ -1197,12 +1201,16 @@ PHP_FUNCTION(unserialize)
 	PHP_VAR_UNSERIALIZE_INIT(var_hash);
 
 	prev_class_hash = php_var_unserialize_get_allowed_classes(var_hash);
+	prev_max_depth = php_var_unserialize_get_max_depth(var_hash);
+	prev_cur_depth = php_var_unserialize_get_cur_depth(var_hash);
 	if (options != NULL) {
-		classes = zend_hash_str_find(Z_ARRVAL_P(options), "allowed_classes", sizeof("allowed_classes")-1);
+		zval *classes, *max_depth;
+
+		classes = zend_hash_str_find_deref(Z_ARRVAL_P(options), "allowed_classes", sizeof("allowed_classes")-1);
 		if (classes && Z_TYPE_P(classes) != IS_ARRAY && Z_TYPE_P(classes) != IS_TRUE && Z_TYPE_P(classes) != IS_FALSE) {
 			php_error_docref(NULL, E_WARNING, "allowed_classes option should be array or boolean");
-			PHP_VAR_UNSERIALIZE_DESTROY(var_hash);
-			RETURN_FALSE;
+			RETVAL_FALSE;
+			goto cleanup;
 		}
 
 		if(classes && (Z_TYPE_P(classes) == IS_ARRAY || !zend_is_true(classes))) {
@@ -1219,8 +1227,32 @@ PHP_FUNCTION(unserialize)
 				zend_hash_add_empty_element(class_hash, lcname);
 		        zend_string_release_ex(lcname, 0);
 			} ZEND_HASH_FOREACH_END();
+
+			/* Exception during string conversion. */
+			if (EG(exception)) {
+				goto cleanup;
+			}
 		}
 		php_var_unserialize_set_allowed_classes(var_hash, class_hash);
+
+		max_depth = zend_hash_str_find_deref(Z_ARRVAL_P(options), "max_depth", sizeof("max_depth") - 1);
+		if (max_depth) {
+			if (Z_TYPE_P(max_depth) != IS_LONG) {
+				php_error_docref(NULL, E_WARNING, "max_depth should be int");
+				RETVAL_FALSE;
+				goto cleanup;
+			}
+			if (Z_LVAL_P(max_depth) < 0) {
+				php_error_docref(NULL, E_WARNING, "max_depth cannot be negative");
+				RETVAL_FALSE;
+				goto cleanup;
+			}
+
+			php_var_unserialize_set_max_depth(var_hash, Z_LVAL_P(max_depth));
+			/* If the max_depth for a nested unserialize() call has been overridden,
+			 * start counting from zero again (for the nested call only). */
+			php_var_unserialize_set_cur_depth(var_hash, 0);
+		}
 	}
 
 	if (BG(unserialize).level > 1) {
@@ -1244,13 +1276,16 @@ PHP_FUNCTION(unserialize)
 		gc_check_possible_root(ref);
 	}
 
+cleanup:
 	if (class_hash) {
 		zend_hash_destroy(class_hash);
 		FREE_HASHTABLE(class_hash);
 	}
 
-	/* Reset to previous allowed_classes in case this is a nested call */
+	/* Reset to previous options in case this is a nested call */
 	php_var_unserialize_set_allowed_classes(var_hash, prev_class_hash);
+	php_var_unserialize_set_max_depth(var_hash, prev_max_depth);
+	php_var_unserialize_set_cur_depth(var_hash, prev_cur_depth);
 	PHP_VAR_UNSERIALIZE_DESTROY(var_hash);
 
 	/* Per calling convention we must not return a reference here, so unwrap. We're doing this at
@@ -1289,3 +1324,13 @@ PHP_FUNCTION(memory_get_peak_usage) {
 	RETURN_LONG(zend_memory_peak_usage(real_usage));
 }
 /* }}} */
+
+PHP_INI_BEGIN()
+	STD_PHP_INI_ENTRY("unserialize_max_depth", "4096", PHP_INI_ALL, OnUpdateLong, unserialize_max_depth, php_basic_globals, basic_globals)
+PHP_INI_END()
+
+PHP_MINIT_FUNCTION(var)
+{
+	REGISTER_INI_ENTRIES();
+	return SUCCESS;
+}

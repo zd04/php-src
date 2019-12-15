@@ -148,11 +148,6 @@
 ;   Development Value: Off
 ;   Production Value: Off
 
-; track_errors
-;   Default Value: Off
-;   Development Value: On
-;   Production Value: Off
-
 ; variables_order
 ;   Default Value: "EGPCS"
 ;   Development Value: "GPCS"
@@ -289,6 +284,13 @@ implicit_flush = Off
 ; callback-function.
 unserialize_callback_func =
 
+; The unserialize_max_depth specifies the default depth limit for unserialized
+; structures. Setting the depth limit too high may result in stack overflows
+; during unserialization. The unserialize_max_depth ini setting can be
+; overridden by the max_depth option on individual unserialize() calls.
+; A value of 0 disables the depth limit.
+;unserialize_max_depth = 4096
+
 ; When floats & doubles are serialized, store serialize_precision significant
 ; digits after the floating point. The default value ensures that when floats
 ; are decoded with unserialize, the data will remain the same.
@@ -358,6 +360,12 @@ zend.enable_gc = On
 ; Only affects if zend.multibyte is set.
 ; Default: ""
 ;zend.script_encoding =
+
+; Allows to include or exclude arguments from stack traces generated for exceptions
+; Default: Off
+; In production, it is recommended to turn this setting on to prohibit the output 
+; of sensitive information in stack traces
+zend.exception_ignore_args = On
 
 ;;;;;;;;;;;;;;;;;
 ; Miscellaneous ;
@@ -595,6 +603,7 @@ report_memleaks = On
 ;   ascii (all printable ASCII characters and NL)
 ;   no-ctrl (all characters except control characters)
 ;   all (all characters)
+;   raw (like "all", but messages are not split at newlines)
 ; http://php.net/syslog.filter
 ;syslog.filter = ascii
 
@@ -903,6 +912,7 @@ default_socket_timeout = 60
 ;
 ;extension=bz2
 ;extension=curl
+;extension=ffi
 ;extension=fileinfo
 ;extension=gd2
 ;extension=gettext
@@ -1684,6 +1694,11 @@ zend.assertions = -1
 ; Default: 100000
 ;mbstring.regex_stack_limit=100000
 
+; This directive specifies maximum retry count for mbstring regular expressions. It is similar
+; to the pcre.backtrack_limit for PCRE.
+; Default: 1000000
+;mbstring.regex_retry_limit=1000000
+
 [gd]
 ; Tell the jpeg decode to ignore warnings and try to create
 ; a gd image. The warning will then be displayed as notices
@@ -1851,6 +1866,10 @@ ldap.max_links = -1
 ; errors.
 ;opcache.mmap_base=
 
+; Facilitates multiple OPcache instances per user (for Windows only). All PHP
+; processes with the same cache ID and user share an OPcache instance.
+;opcache.cache_id=
+
 ; Enables and sets the second level cache directory.
 ; It should improve performance when SHM memory is full, at server restart or
 ; SHM reset. The default "" disables file based caching.
@@ -1886,6 +1905,11 @@ ldap.max_links = -1
 ; http://php.net/opcache.preload
 ;opcache.preload=
 
+; Preloading code as root is not allowed for security reasons. This directive
+; facilitates to let the preloading to be run as another user.
+; http://php.net/opcache.preload_user
+;opcache.preload_user=
+
 ; Prevents caching files that are less than this number of seconds old. It
 ; protects from caching of incompletely updated files. In case all file updates
 ; on your site are atomic, you may increase performance by setting it to "0".
@@ -1918,8 +1942,11 @@ ldap.max_links = -1
 ;openssl.capath=
 
 [ffi]
-; FFI API restriction. Possibe values:
+; FFI API restriction. Possible values:
 ; "preload" - enabled in CLI scripts and preloaded files (default)
 ; "false"   - always disabled
 ; "true"    - always enabled
 ;ffi.enable=preload
+
+; List of headers files to preload, wildcard patterns allowed.
+;ffi.preload=

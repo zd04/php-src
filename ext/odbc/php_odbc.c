@@ -1343,9 +1343,7 @@ PHP_FUNCTION(odbc_execute)
 			}
 
 			otype = Z_TYPE_P(tmp);
-			convert_to_string_ex(tmp);
-			if (Z_TYPE_P(tmp) != IS_STRING) {
-				php_error_docref(NULL, E_WARNING,"Error converting parameter");
+			if (!try_convert_to_string(tmp)) {
 				SQLFreeStmt(result->stmt, SQL_RESET_PARAMS);
 				for (i = 0; i < result->numparams; i++) {
 					if (params[i].fp != -1) {
@@ -2696,7 +2694,10 @@ PHP_FUNCTION(odbc_close)
 		return;
 	}
 
-	conn = (odbc_connection *)zend_fetch_resource2(Z_RES_P(pv_conn), "ODBC-Link", le_conn, le_pconn);
+	if (!(conn = (odbc_connection *)zend_fetch_resource2(Z_RES_P(pv_conn), "ODBC-Link", le_conn, le_pconn))) {
+		RETURN_FALSE;
+	}
+
 	if (Z_RES_P(pv_conn)->type == le_pconn) {
 		is_pconn = 1;
 	}
